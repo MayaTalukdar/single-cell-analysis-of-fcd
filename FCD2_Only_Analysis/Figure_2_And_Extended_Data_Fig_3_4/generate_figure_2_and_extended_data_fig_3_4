@@ -1,0 +1,264 @@
+library(tidyverse)
+library(ggplot2)
+library(Seurat)
+options(Seurat.object.assay.version = "v3")
+library(msigdbr)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(DOSE)
+library(enrichplot)
+library(limma)
+library(gplots)
+library(marray)
+library(RMySQL)
+library(stringr)
+library(reshape2)
+library(dplyr)
+library(fgsea)
+library(pheatmap)
+library(cowplot)
+library(patchwork)
+library(scCustomize)
+library(fgsea)
+library(lsa)
+library(rjson)
+library(harmony)
+library(Azimuth)
+library(RColorBrewer)
+
+source("/n/groups/walsh/indData/Maya/microCHIP_AD_project/GOT/FCD_Analysis/Final_Analysis_For_First_Submission/util.R")
+seurat_obj <- readRDS("/n/groups/walsh/indData/Maya/FCD_project/analysis/1_Analyze_FCD_Object/Output/Seurat_Objects/7_processed_seurat_obj_integrated_withClustering_doubletsFiltered_FCD1Filtered.RDS")
+full_metadata <- readRDS("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/Seurat_Objects/8_processed_seurat_obj_integrated_azimuthAnnotations_ourAnnotations_doubletsFiltered_FCD1Filtered_metadata.RDS")
+metadata <- seurat_obj@meta.data
+
+#add in annotations from the full object 
+final_annots_vec <- setNames(full_metadata$final_annots, row.names(full_metadata))
+final_annots_from_full_obj <- final_annots_vec[row.names(seurat_obj@meta.data)]
+final_annots_from_full_obj[which(is.na(final_annots_from_full_obj))] <- "NotInFullObject"
+seurat_obj$final_annots_from_full_obj <- unname(final_annots_from_full_obj)
+
+###################
+#ANNOTATION - 
+###################
+#*********************
+#harmony
+#*********************
+##0. plot the unsupervised harmony clusters versus the predicted.subclass annotations
+pdf("/n/groups/walsh/indData/Maya/FCD_project/analysis/1_Analyze_FCD_Object/Output/Annotation/Harmony/0_unsupervised_clusters_vs_azimuth_predicted_class_harmony.pdf", width = 10, height = 6)
+p1 <- DimPlot(seurat_obj, reduction = "umap.harmony", group.by = c("harmony_clusters"), label = TRUE, label.size = 2, repel = FALSE) + NoLegend()
+p2 <- DimPlot(seurat_obj, reduction = "umap.harmony", group.by = c("predicted.subclass"), label = TRUE, label.size = 2, repel = TRUE) + NoLegend()
+wrap_plots(p1, p2, nrow = 1)
+dev.off()
+
+##1. examine the label transfer subclass score per unsupervised clusters
+label_transfer_score_df <- metadata %>% 
+  group_by(harmony_clusters, predicted.subclass) %>% 
+  summarize(med_pred_score = median(predicted.subclass.score), .groups = "drop") %>% 
+  pivot_wider(names_from = predicted.subclass, 
+              values_from = med_pred_score, 
+              values_fill = 0) %>% as.data.frame()
+row.names(label_transfer_score_df) <- paste0("Harmony Cluster ", label_transfer_score_df$harmony_clusters)
+label_transfer_score_df <- label_transfer_score_df[,-1]
+
+###heatmap
+custom_colors <- colorRampPalette(c("blue", "white", "red"))(100)
+breaks <- seq(min(label_transfer_score_df, na.rm = TRUE), 
+              max(label_transfer_score_df, na.rm = TRUE), 
+              length.out = 101)
+white_index <- which.min(abs(breaks - 0.6))
+breaks[white_index] <- 0.6
+pheatmap(label_transfer_score_df, 
+         cluster_rows = FALSE, 
+         cluster_cols = FALSE, # Do not cluster columns
+         scale = "none", 
+         color = custom_colors,
+         breaks = breaks,
+         filename = "/n/groups/walsh/indData/Maya/FCD_project/analysis/1_Analyze_FCD_Object/Output/Annotation/Harmony/1a_predicted_subclass_harmony_scores_heatmap.pdf")
+
+###violin plot
+label_transfer_long <- label_transfer_score_df %>%
+  rownames_to_column(var = "Cluster") %>%
+  pivot_longer(cols = -Cluster, 
+               names_to = "Cell_Type", 
+               values_to = "Score")
+
+label_transfer_long$Cell_Type <- factor(label_transfer_long$Cell_Type, 
+                                              levels = sort(unique(label_transfer_long$Cell_Type)))
+
+max_cell_type <- sapply(unique(label_transfer_long$Cluster), function(x) max((label_transfer_long %>% filter(Cluster == x))$Score))
+max_cell_type <- max_cell_type[rev(order(max_cell_type))]
+label_transfer_long$Cluster <- factor(label_transfer_long$Cluster, levels = names(max_cell_type))
+
+pdf("/n/groups/walsh/indData/Maya/FCD_project/analysis/1_Analyze_FCD_Object/Output/Annotation/Harmony/1b_predicted_subclass_harmony_scores_vlnplot.pdf", width = 14, height = 5)
+ggplot(label_transfer_long, aes(x = Cluster, y = Score)) +
+  geom_violin(fill = "gray80", alpha = 0.7, trim = TRUE) + # Uniform gray violin fill
+  geom_jitter(aes(color = Cell_Type), width = 0.2, size = 1, alpha = 0.7) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "Cluster", y = "Prediction Score") +
+  geom_hline(yintercept = 0.6, color = "red", linetype = "dashed")
+dev.off()
+
+##2. examine max predicted score per cluster
+max_score_per_cluster <- apply(label_transfer_score_df, 1, max)
+max_score_per_cluster <- max_score_per_cluster[order(max_score_per_cluster)]
+
+##3. examine qc metrics per cluster
+Idents(seurat_obj) <- "harmony_clusters"
+p1 <- QC_Plots_Genes(seurat_object = seurat_obj, plot_title = "Genes Per Cell", raster = TRUE) + ylab("")
+p2 <- QC_Plots_UMIs(seurat_object = seurat_obj, plot_title = "UMIs Per Cell", raster = TRUE) + ylab("")
+p3 <- QC_Plots_Mito(seurat_object = seurat_obj, plot_title = "Mito Gene % Per Cell", raster = TRUE) + ylab("")
+p4 <- QC_Plots_Feature(seurat_object = seurat_obj, feature = "percent_ribo", plot_title = "Ribo Gene % Per Cell", raster = TRUE) + ylab("")
+
+pdf("/n/groups/walsh/indData/Maya/FCD_project/analysis/1_Analyze_FCD_Object/Output/Annotation/Harmony/2_qc_by_cluster.pdf", width = 20, height = 10)
+wrap_plots(p1, p2, p3, p4, ncol = 1)
+dev.off()
+
+#*********************
+#rpca
+#*********************
+##0. plot the unsupervised rpca clusters versus the predicted.subclass annotations
+pdf("/n/groups/walsh/indData/Maya/FCD_project/analysis/1_Analyze_FCD_Object/Output/Annotation/RPCA/0_unsupervised_clusters_vs_azimuth_predicted_class_rpca.pdf", width = 10, height = 6)
+p1 <- DimPlot(seurat_obj, reduction = "umap.rpca", group.by = c("rpca_clusters"), label = TRUE, label.size = 2, repel = FALSE) + NoLegend()
+p2 <- DimPlot(seurat_obj, reduction = "umap.rpca", group.by = c("predicted.subclass"), label = TRUE, label.size = 2, repel = TRUE) + NoLegend()
+wrap_plots(p1, p2, nrow = 1)
+dev.off()
+
+##1. examine the label transfer subclass score per unsupervised clusters
+label_transfer_score_df <- metadata %>% 
+  group_by(rpca_clusters, predicted.subclass) %>% 
+  summarize(med_pred_score = median(predicted.subclass.score), .groups = "drop") %>% 
+  pivot_wider(names_from = predicted.subclass, 
+              values_from = med_pred_score, 
+              values_fill = 0) %>% as.data.frame()
+row.names(label_transfer_score_df) <- paste0("RPCA Cluster ", label_transfer_score_df$rpca_clusters)
+label_transfer_score_df <- label_transfer_score_df[,-1]
+
+###heatmap
+custom_colors <- colorRampPalette(c("blue", "white", "red"))(100)
+breaks <- seq(min(label_transfer_score_df, na.rm = TRUE), 
+              max(label_transfer_score_df, na.rm = TRUE), 
+              length.out = 101)
+white_index <- which.min(abs(breaks - 0.6))
+breaks[white_index] <- 0.6
+pheatmap(label_transfer_score_df, 
+         cluster_rows = FALSE, 
+         cluster_cols = FALSE, # Do not cluster columns
+         scale = "none", 
+         color = custom_colors,
+         breaks = breaks,
+         filename = "/n/groups/walsh/indData/Maya/FCD_project/analysis/1_Analyze_FCD_Object/Output/Annotation/RPCA/1a_predicted_subclass_rpca_scores_heatmap.pdf")
+
+###violin plot
+label_transfer_long <- label_transfer_score_df %>%
+  rownames_to_column(var = "Cluster") %>%
+  pivot_longer(cols = -Cluster, 
+               names_to = "Cell_Type", 
+               values_to = "Score")
+
+label_transfer_long$Cell_Type <- factor(label_transfer_long$Cell_Type, 
+                                              levels = sort(unique(label_transfer_long$Cell_Type)))
+
+max_cell_type <- sapply(unique(label_transfer_long$Cluster), function(x) max((label_transfer_long %>% filter(Cluster == x))$Score))
+max_cell_type <- max_cell_type[rev(order(max_cell_type))]
+label_transfer_long$Cluster <- factor(label_transfer_long$Cluster, levels = names(max_cell_type))
+
+pdf("/n/groups/walsh/indData/Maya/FCD_project/analysis/1_Analyze_FCD_Object/Output/Annotation/RPCA/1b_predicted_subclass_rpca_scores_vlnplot.pdf", width = 14, height = 5)
+ggplot(label_transfer_long, aes(x = Cluster, y = Score)) +
+  geom_violin(fill = "gray80", alpha = 0.7, trim = TRUE) + # Uniform gray violin fill
+  geom_jitter(aes(color = Cell_Type), width = 0.2, size = 1, alpha = 0.7) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "Cluster", y = "Prediction Score") +
+  geom_hline(yintercept = 0.6, color = "red", linetype = "dashed")
+dev.off()
+
+##2. examine max predicted score per cluster
+max_score_per_cluster <- apply(label_transfer_score_df, 1, max)
+max_score_per_cluster <- max_score_per_cluster[order(max_score_per_cluster)]
+
+##3. examine qc metrics per cluster
+Idents(seurat_obj) <- "rpca_clusters"
+p1 <- QC_Plots_Genes(seurat_object = seurat_obj, plot_title = "Genes Per Cell", raster = TRUE) + ylab("")
+p2 <- QC_Plots_UMIs(seurat_object = seurat_obj, plot_title = "UMIs Per Cell", raster = TRUE) + ylab("")
+p3 <- QC_Plots_Mito(seurat_object = seurat_obj, plot_title = "Mito Gene % Per Cell", raster = TRUE) + ylab("")
+p4 <- QC_Plots_Feature(seurat_object = seurat_obj, feature = "percent_ribo", plot_title = "Ribo Gene % Per Cell", raster = TRUE) + ylab("")
+
+pdf("/n/groups/walsh/indData/Maya/FCD_project/analysis/1_Analyze_FCD_Object/Output/Annotation/RPCA/2_qc_by_cluster.pdf", width = 20, height = 10)
+wrap_plots(p1, p2, p3, p4, ncol = 1)
+dev.off()
+
+#*********************
+#cca
+#*********************
+##0. plot the unsupervised cca clusters versus the predicted.subclass annotations
+pdf("/n/groups/walsh/indData/Maya/FCD_project/analysis/1_Analyze_FCD_Object/Output/Annotation/CCA/0_unsupervised_clusters_vs_azimuth_predicted_class_cca.pdf", width = 10, height = 6)
+p1 <- DimPlot(seurat_obj, reduction = "umap.cca", group.by = c("cca_clusters"), label = TRUE, label.size = 2, repel = FALSE) + NoLegend()
+p2 <- DimPlot(seurat_obj, reduction = "umap.cca", group.by = c("predicted.subclass"), label = TRUE, label.size = 2, repel = TRUE) + NoLegend()
+wrap_plots(p1, p2, nrow = 1)
+dev.off()
+
+##1. examine the label transfer subclass score per unsupervised clusters
+label_transfer_score_df <- metadata %>% 
+  group_by(cca_clusters, predicted.subclass) %>% 
+  summarize(med_pred_score = median(predicted.subclass.score), .groups = "drop") %>% 
+  pivot_wider(names_from = predicted.subclass, 
+              values_from = med_pred_score, 
+              values_fill = 0) %>% as.data.frame()
+row.names(label_transfer_score_df) <- paste0("CCA Cluster ", label_transfer_score_df$cca_clusters)
+label_transfer_score_df <- label_transfer_score_df[,-1]
+
+###heatmap
+custom_colors <- colorRampPalette(c("blue", "white", "red"))(100)
+breaks <- seq(min(label_transfer_score_df, na.rm = TRUE), 
+              max(label_transfer_score_df, na.rm = TRUE), 
+              length.out = 101)
+white_index <- which.min(abs(breaks - 0.6))
+breaks[white_index] <- 0.6
+pheatmap(label_transfer_score_df, 
+         cluster_rows = FALSE, 
+         cluster_cols = FALSE, # Do not cluster columns
+         scale = "none", 
+         color = custom_colors,
+         breaks = breaks,
+         filename = "/n/groups/walsh/indData/Maya/FCD_project/analysis/1_Analyze_FCD_Object/Output/Annotation/CCA/1a_predicted_subclass_cca_scores_heatmap.pdf")
+
+###violin plot
+label_transfer_long <- label_transfer_score_df %>%
+  rownames_to_column(var = "Cluster") %>%
+  pivot_longer(cols = -Cluster, 
+               names_to = "Cell_Type", 
+               values_to = "Score")
+
+label_transfer_long$Cell_Type <- factor(label_transfer_long$Cell_Type, 
+                                              levels = sort(unique(label_transfer_long$Cell_Type)))
+
+max_cell_type <- sapply(unique(label_transfer_long$Cluster), function(x) max((label_transfer_long %>% filter(Cluster == x))$Score))
+max_cell_type <- max_cell_type[rev(order(max_cell_type))]
+label_transfer_long$Cluster <- factor(label_transfer_long$Cluster, levels = names(max_cell_type))
+
+pdf("/n/groups/walsh/indData/Maya/FCD_project/analysis/1_Analyze_FCD_Object/Output/Annotation/CCA/1b_predicted_subclass_cca_scores_vlnplot.pdf", width = 14, height = 10)
+ggplot(label_transfer_long, aes(x = Cluster, y = Score)) +
+  geom_violin(fill = "gray80", alpha = 0.7, trim = TRUE) + # Uniform gray violin fill
+  geom_jitter(aes(color = Cell_Type), width = 0.2, size = 1, alpha = 0.7) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "Cluster", y = "Prediction Score") +
+  geom_hline(yintercept = 0.6, color = "red", linetype = "dashed")
+dev.off()
+
+##2. examine max predicted score per cluster
+max_score_per_cluster <- apply(label_transfer_score_df, 1, max)
+max_score_per_cluster <- max_score_per_cluster[order(max_score_per_cluster)]
+
+##3. examine qc metrics per cluster
+Idents(seurat_obj) <- "cca_clusters"
+p1 <- QC_Plots_Genes(seurat_object = seurat_obj, plot_title = "Genes Per Cell", raster = TRUE) + ylab("")
+p2 <- QC_Plots_UMIs(seurat_object = seurat_obj, plot_title = "UMIs Per Cell", raster = TRUE) + ylab("")
+p3 <- QC_Plots_Mito(seurat_object = seurat_obj, plot_title = "Mito Gene % Per Cell", raster = TRUE) + ylab("")
+p4 <- QC_Plots_Feature(seurat_object = seurat_obj, feature = "percent_ribo", plot_title = "Ribo Gene % Per Cell", raster = TRUE) + ylab("")
+
+pdf("/n/groups/walsh/indData/Maya/FCD_project/analysis/1_Analyze_FCD_Object/Output/Annotation/CCA/2_qc_by_cluster.pdf", width = 20, height = 10)
+wrap_plots(p1, p2, p3, p4, ncol = 1)
+dev.off()
+

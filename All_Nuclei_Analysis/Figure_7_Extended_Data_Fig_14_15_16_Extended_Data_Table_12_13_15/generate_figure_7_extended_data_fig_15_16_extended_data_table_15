@@ -1,0 +1,435 @@
+library(tidyverse)
+library(ggplot2)
+library(Seurat)
+library(fgsea)
+library(pheatmap)
+library(cowplot)
+library(patchwork)
+library(scCustomize)
+library(CellChat)
+library(msigdbr)
+library(org.Hs.eg.db)
+library(readxl)
+library(xlsx)
+library(ggrepel)
+
+###########################
+#I/O
+###########################
+# seurat_obj <- readRDS("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/Seurat_Objects/9_processed_seurat_obj_integrated_azimuthAnnotations_ourAnnotations_doubletsFiltered_FCD1Filtered_looseGenotyping.RDS")
+# Idents(seurat_obj) <- "orig.ident"
+
+# #add in final class categories
+# higher_level_annots <- c(
+# "Oligo" = "Oligo/OPC", 
+# "OPC" = "Oligo/OPC",
+# "Astro" = "Astro",
+# "L2/3 IT" = "UL_ExN",
+# "Micro-PVM" = "Microglia", 
+# "Pvalb" = "IN_MGE", 
+# "L4 IT" = "DL_ExN", 
+# "L5 IT" = "DL_ExN", 
+# "L5 ET" = "DL_ExN", 
+# "Vip" = "IN_CGE", 
+# "Sst" = "IN_MGE", 
+# "Sncg" = "IN_CGE",
+# "Lamp5" = "IN_CGE", 
+# "L5/6 NP" = "DL_ExN", 
+# "L6 CT" = "DL_ExN", 
+# "L6 IT" = "DL_ExN", 
+# "L6 IT Car3" = "DL_ExN", 
+# "L6b" = "DL_ExN", 
+# "Endo" = "Endo", 
+# "VLMC" = "VLMC"
+# )
+# seurat_obj$final_class <- setNames(higher_level_annots[seurat_obj$final_annots], names(seurat_obj$final_annots))
+
+# #add in final supraclass category 
+# seurat_obj$final_supraclass <- sapply(seurat_obj$final_class, function(x) ifelse(grepl("ExN", x), "Excitatory", ifelse(grepl("IN", x), "Inhibitory", "Non-Neuronal")))
+
+# merged.Seurat.obj <- RunUMAP(seurat_obj, reduction = "harmony", dims = 1:30, reduction.name = "umap.harmony", return.model = TRUE)
+
+# #####################
+# #CASE/CONTROL GSEA (WILCOX)
+# #####################
+# #write out version of DEG files with only protein coding genes
+# protein_coding_genes <- setNames(unlist(data.table::fread("/n/groups/walsh/indData/Maya/sex_differences_in_the_heart/human_protein_coding_genes.txt", header = TRUE)), NULL)
+# dir.create("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/DEG_Results_Het_Ref/wilcox_10/Protein-Coding/")
+# for (file in list.files("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/DEG_Results_Het_Ref/wilcox_10/All/", pattern = ".RDS"))
+# {
+# 	res <- readRDS(paste0("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/DEG_Results_Het_Ref/wilcox_10/All/", file))
+# 	res <- res %>% filter(row.names(res) %in% protein_coding_genes)
+# 	saveRDS(res, paste0("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/DEG_Results_Het_Ref/wilcox_10/Protein-Coding/", file))
+#   write.csv(res, paste0("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/DEG_Results_Het_Ref/wilcox_10/Protein-Coding/", gsub(".RDS", "", file), ".csv"))
+# }
+
+# #get hallmark gene sets
+# h_gene_sets = msigdbr(species = "human", category = "H")
+# hallmark_gs <- lapply(unique(h_gene_sets$gs_name), function(x) h_gene_sets$gene_symbol[which(h_gene_sets$gs_name == x)])
+# names(hallmark_gs) <- unique(h_gene_sets$gs_name)
+# pathway_list <- hallmark_gs
+
+# #add epilepsy gene sets
+# ##DisGeNET
+# epilepsy_gene_set <- jsonlite::fromJSON(txt="/n/groups/walsh/indData/Maya/FCD_project/raw_data/Ontologies/disgenet_epilepsy_json_string.json")
+# epilepsy_gene_set <-  epilepsy_gene_set$associations$gene$symbol
+# pathway_list[["epilepsy_DisGeNET"]] <- epilepsy_gene_set
+
+# ##Macnee et al., 
+# macnee_data <- read.csv("/n/groups/walsh/indData/Maya/FCD_project/raw_data/Ontologies/macnee_epilepsy_genes.csv", header = TRUE)
+# pathway_list[["epilepsy_macnee_high_conf"]] <- (macnee_data %>% filter(Classification == "tier 1"))$Symbol
+# pathway_list[["epilepsy_macnee"]] <- macnee_data$Symbol
+
+# #add synapse gene sets 
+# ##SynGO
+# syngo_list <- read_excel("/n/groups/walsh/indData/Maya/FCD_project/raw_data/Ontologies/SynGo/syngo_annotations.xlsx") %>% as.data.frame()
+# syngo_list <- split(syngo_list, syngo_list$go_name)
+# syngo_list <- lapply(syngo_list, function(x) x$hgnc_symbol)
+# names(syngo_list) <- sapply(names(syngo_list), function(x) strsplit(x, "(", fixed = TRUE)[[1]][1])
+# pathway_list <- c(pathway_list , syngo_list) 
+
+# #add autism gene set 
+# sfari <- read.csv("/n/groups/walsh/indData/Maya/Finalized_Convergence_In_ASD/Cell_Lines/raw_data/sfari.csv", header = TRUE)
+# SFARI_genes <- unique(sfari$gene.symbol)
+# high_conf_SFARI_genes <- unique((sfari %>% filter(gene.score == 1))$gene.symbol)
+# pathway_list[["sfari"]] <- SFARI_genes
+# pathway_list[["high_conf_sfari"]] <- high_conf_SFARI_genes
+
+# #run gsea
+# wd <- "/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/DEG_Results_Het_Ref/wilcox_10/Protein-Coding"
+# gsea_res_list <- list()
+# for (file in list.files(wd, ".RDS"))
+# {
+#   type <- gsub("_DEG_res.RDS", "", file)
+#   print(type)
+#   DEG_res <- readRDS(paste0(wd, "/", file)) %>% arrange(desc(avg_log2FC)) %>% filter(pct.1 > 0.10) %>% filter(pct.2 > 0.10)
+#   ranks <- setNames(DEG_res$avg_log2FC, row.names(DEG_res))
+#   gsea_res_list[[type]] <- fgsea(pathways = pathway_list, 
+#                   stats    = ranks,
+#                   minSize  = 20,
+#                   maxSize  = 5000) %>% mutate(cellType = type)
+# }
+# saveRDS(gsea_res_list, "/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/diff_expr_het_vs_ref/Wilcox/gsea_res_list.RDS")
+
+# #create tabular format for results 
+# gsea_res_list <- readRDS("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/diff_expr_het_vs_ref/Wilcox/gsea_res_list.RDS")
+# mat_for_plot_full <- do.call(rbind, gsea_res_list)
+
+# #add additional formatting changes to tidy things up 
+# ##filter out any pathways that are not significant across all comparisons 
+# mat_for_plot_full <- mat_for_plot_full %>%
+#   group_by(pathway) %>%
+#   filter(any(padj <= 0.05)) %>%
+#   ungroup()
+
+# ##convert non significant p-values to a NES of 0  & restrict to only hallmark pathways
+# mat_for_plot <- mat_for_plot_full %>%
+#   filter(grepl("HALLMARK", pathway)) %>% as.data.frame() %>%
+#   mutate(NES = ifelse(padj > 0.05, 0, NES)) %>%
+#   dplyr::select(cellType, pathway, NES) %>%
+#   pivot_wider(names_from = cellType, values_from = NES) %>% 
+#   replace(is.na(.), 0) %>%  # Replace NA values with 0
+#   column_to_rownames(var = "pathway") %>% 
+#   as.data.frame()
+
+# #create plot
+# paletteLength <- 50
+# myBreaks <- c(seq(min(mat_for_plot), 0, length.out=ceiling(paletteLength/2) + 1), 
+#               seq(max(mat_for_plot)/paletteLength, max(mat_for_plot), length.out=floor(paletteLength/2)))
+# pheatmap(mat_for_plot, breaks = myBreaks, fontsize_number = 24, cluster_cols = TRUE, color=colorRampPalette(c("navy", "white", "red"))(50),  main = "Hallmark Enriched Pathways", filename = "/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/diff_expr_het_vs_ref/Wilcox/hetVsRefGSEA_Hallmark.pdf", height = 7, width = 8)
+
+# #note: uses matrix generated for panel A
+# mat_for_plot <- mat_for_plot_full %>%
+#   filter(!grepl("HALLMARK", pathway)) %>% as.data.frame() %>%
+#   mutate(NES = ifelse(padj > 0.05, 0, NES)) %>%
+#   dplyr::select(cellType, pathway, NES) %>%
+#   pivot_wider(names_from = cellType, values_from = NES) %>% 
+#   replace(is.na(.), 0) %>%  # Replace NA values with 0
+#   column_to_rownames(var = "pathway") %>% 
+#   as.data.frame()
+
+# #create plot
+# paletteLength <- 50
+# myBreaks <- c(seq(min(mat_for_plot), 0, length.out=ceiling(paletteLength/2) + 1), 
+#               seq(max(mat_for_plot)/paletteLength, max(mat_for_plot), length.out=floor(paletteLength/2)))
+# pheatmap(mat_for_plot, fontsize_number = 24, cluster_cols = TRUE, color=colorRampPalette(c("navy", "white", "red"))(50),  main = "Epilepsy Enriched Pathways", filename = "/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/diff_expr_het_vs_ref/Wilcox/hetVsRefGSEA_Epilepsy.pdf", height = 6, width = 10)
+
+# ######################
+# #CASE/CONTROL GSEA (MAST)
+# ######################
+# #write out version of DEG files with only protein coding genes
+# protein_coding_genes <- setNames(unlist(data.table::fread("/n/groups/walsh/indData/Maya/sex_differences_in_the_heart/human_protein_coding_genes.txt", header = TRUE)), NULL)
+# dir.create("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/DEG_Results_Het_Ref/mast_10/Protein-Coding/")
+# for (file in list.files("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/DEG_Results_Het_Ref/mast_10/All/"))
+# {
+#   res <- readRDS(paste0("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/DEG_Results_Het_Ref/mast_10/All/", file))
+#   res <- res %>% filter(row.names(res) %in% protein_coding_genes)
+#   saveRDS(res, paste0("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/DEG_Results_Het_Ref/mast_10/Protein-Coding/", file))
+#   write.csv(res, paste0("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/DEG_Results_Het_Ref/mast_10/Protein-Coding/", gsub(".RDS", "", file), ".csv"))
+# }
+
+# #get hallmark gene sets
+# h_gene_sets = msigdbr(species = "human", category = "H")
+# hallmark_gs <- lapply(unique(h_gene_sets$gs_name), function(x) h_gene_sets$gene_symbol[which(h_gene_sets$gs_name == x)])
+# names(hallmark_gs) <- unique(h_gene_sets$gs_name)
+# pathway_list <- hallmark_gs
+
+# #add epilepsy gene sets
+# ##DisGeNET
+# epilepsy_gene_set <- jsonlite::fromJSON(txt="/n/groups/walsh/indData/Maya/FCD_project/raw_data/Ontologies/disgenet_epilepsy_json_string.json")
+# epilepsy_gene_set <-  epilepsy_gene_set$associations$gene$symbol
+# pathway_list[["epilepsy_DisGeNET"]] <- epilepsy_gene_set
+
+# ##Macnee et al., 
+# macnee_data <- read.csv("/n/groups/walsh/indData/Maya/FCD_project/raw_data/Ontologies/macnee_epilepsy_genes.csv", header = TRUE)
+# pathway_list[["epilepsy_macnee_high_conf"]] <- (macnee_data %>% filter(Classification == "tier 1"))$Symbol
+# pathway_list[["epilepsy_macnee"]] <- macnee_data$Symbol
+
+# #add synapse gene sets 
+# ##SynGO
+# syngo_list <- read_excel("/n/groups/walsh/indData/Maya/FCD_project/raw_data/Ontologies/SynGo/syngo_annotations.xlsx") %>% as.data.frame()
+# syngo_list <- split(syngo_list, syngo_list$go_name)
+# syngo_list <- lapply(syngo_list, function(x) x$hgnc_symbol)
+# names(syngo_list) <- sapply(names(syngo_list), function(x) strsplit(x, "(", fixed = TRUE)[[1]][1])
+# pathway_list <- c(pathway_list , syngo_list) 
+
+# #add autism gene set 
+# sfari <- read.csv("/n/groups/walsh/indData/Maya/Finalized_Convergence_In_ASD/Cell_Lines/raw_data/sfari.csv", header = TRUE)
+# SFARI_genes <- unique(sfari$gene.symbol)
+# high_conf_SFARI_genes <- unique((sfari %>% filter(gene.score == 1))$gene.symbol)
+# pathway_list[["sfari"]] <- SFARI_genes
+# pathway_list[["high_conf_sfari"]] <- high_conf_SFARI_genes
+
+# #run gsea
+# wd <- "/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/DEG_Results_Het_Ref/mast_10/Protein-Coding"
+# gsea_res_list <- list()
+# for (file in list.files(wd, ".RDS"))
+# {
+#   type <- gsub("_DEG_res.RDS", "", file)
+#   print(type)
+#   DEG_res <- readRDS(paste0(wd, "/", file)) %>% arrange(desc(avg_log2FC)) %>% arrange(desc(avg_log2FC)) %>% filter(pct.1 > 0.10) %>% filter(pct.2 > 0.10)
+#   ranks <- setNames(DEG_res$avg_log2FC, row.names(DEG_res))
+#   gsea_res_list[[type]] <- fgsea(pathways = pathway_list, 
+#                   stats    = ranks,
+#                   minSize  = 20,
+#                   maxSize  = 5000) %>% mutate(cellType = type)
+# }
+# saveRDS(gsea_res_list, "/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/diff_expr_het_vs_ref/MAST/gsea_res_list.RDS")
+
+# #create tabular format for results 
+# gsea_res_list <- readRDS("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/diff_expr_het_vs_ref/MAST/gsea_res_list.RDS")
+# mat_for_plot_full <- do.call(rbind, gsea_res_list)
+
+# #add additional formatting changes to tidy things up 
+# ##filter out any pathways that are not significant across all comparisons 
+# mat_for_plot_full <- mat_for_plot_full %>%
+#   group_by(pathway) %>%
+#   filter(any(padj <= 0.05)) %>%
+#   ungroup()
+
+# ##convert non significant p-values to a NES of 0  & restrict to only hallmark pathways
+# mat_for_plot <- mat_for_plot_full %>%
+#   filter(grepl("HALLMARK", pathway)) %>% as.data.frame() %>%
+#   mutate(NES = ifelse(padj > 0.05, 0, NES)) %>%
+#   dplyr::select(cellType, pathway, NES) %>%
+#   pivot_wider(names_from = cellType, values_from = NES) %>% 
+#   replace(is.na(.), 0) %>%  # Replace NA values with 0
+#   column_to_rownames(var = "pathway") %>% 
+#   as.data.frame()
+
+# #create plot
+# paletteLength <- 50
+# myBreaks <- c(seq(min(mat_for_plot), 0, length.out=ceiling(paletteLength/2) + 1), 
+#               seq(max(mat_for_plot)/paletteLength, max(mat_for_plot), length.out=floor(paletteLength/2)))
+# pheatmap(mat_for_plot, breaks = myBreaks, fontsize_number = 24, cluster_cols = TRUE, color=colorRampPalette(c("navy", "white", "red"))(50),  main = "Hallmark Enriched Pathways", filename = "/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/diff_expr_het_vs_ref/MAST/hetVsRefGSEA_Hallmark.pdf", height = 7, width = 8)
+
+# #note: uses matrix generated for panel A
+# mat_for_plot <- mat_for_plot_full %>%
+#   filter(!grepl("HALLMARK", pathway)) %>% as.data.frame() %>%
+#   mutate(NES = ifelse(padj > 0.05, 0, NES)) %>%
+#   dplyr::select(cellType, pathway, NES) %>%
+#   pivot_wider(names_from = cellType, values_from = NES) %>% 
+#   replace(is.na(.), 0) %>%  # Replace NA values with 0
+#   column_to_rownames(var = "pathway") %>% 
+#   as.data.frame()
+
+# #create plot
+# paletteLength <- 50
+# myBreaks <- c(seq(min(mat_for_plot), 0, length.out=ceiling(paletteLength/2) + 1), 
+#               seq(max(mat_for_plot)/paletteLength, max(mat_for_plot), length.out=floor(paletteLength/2)))
+# pheatmap(mat_for_plot, fontsize_number = 24, cluster_cols = TRUE, color=colorRampPalette(c("navy", "white", "red"))(50),  main = "Epilepsy Enriched Pathways", filename = "/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/diff_expr_het_vs_ref/MAST/hetVsRefGSEA_Epilepsy.pdf", height = 6, width = 10)
+
+#####################
+#CELL CHAT
+#####################
+# #add in higher level annots
+# higher_level_annots <- c(
+# "Oligo" = "Oligo/OPC", 
+# "OPC" = "Oligo/OPC",
+# "Astro" = "Astro",
+# "L2/3 IT" = "UL_ExN",
+# "Micro-PVM" = "Microglia", 
+# "Pvalb" = "IN_MGE", 
+# "L4 IT" = "DL_ExN", 
+# "L5 IT" = "DL_ExN", 
+# "L5 ET" = "DL_ExN", 
+# "Vip" = "IN_CGE", 
+# "Sst" = "IN_MGE", 
+# "Sncg" = "IN_CGE",
+# "Lamp5" = "IN_CGE", 
+# "L5/6 NP" = "DL_ExN", 
+# "L6 CT" = "DL_ExN", 
+# "L6 IT" = "DL_ExN", 
+# "L6 IT Car3" = "DL_ExN", 
+# "L6b" = "DL_ExN", 
+# "Endo" = "Endo", 
+# "VLMC" = "VLMC"
+# )
+# seurat_obj$final_class <- setNames(higher_level_annots[seurat_obj$final_annots], names(seurat_obj$final_annots))
+
+# seurat_obj$samples <- seurat_obj$cleaned_ident
+# Idents(seurat_obj) <- "final_annots"
+# cell_types_to_keep <- c("Oligo", "Astro", "L6 CT", "L6b", "L2/3 IT", "L4 IT", "L5 IT", "Sst", "Vip", "Sncg")
+# seurat_obj <- subset(seurat_obj, idents = cell_types_to_keep)
+# Idents(seurat_obj) <- "genotype"
+# seurat_obj_og <- seurat_obj
+# Idents(seurat_obj_og) <- "genotype"
+
+# #create cellchat object for cases 
+# seurat_obj <- subset(seurat_obj_og, idents = "hetero")
+# cellchat <- createCellChat(object = seurat_obj, group.by = "final_class", assay = "RNA")
+
+# CellChatDB <- CellChatDB.human 
+# cellchat@DB <- CellChatDB
+# cellchat <- subsetData(cellchat) 
+
+# cellchat <- identifyOverExpressedGenes(cellchat)
+# cellchat <- identifyOverExpressedInteractions(cellchat)
+# cellchat <- computeCommunProb(cellchat, type = "triMean")
+# cellchat <- filterCommunication(cellchat, min.cells = 10)
+# cellchat <- computeCommunProbPathway(cellchat)
+# cellchat <- aggregateNet(cellchat)
+# cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP") 
+# saveRDS(cellchat, "/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/CellChat_Het_Ref/cell_chat_het_collapsed.RDS")
+
+# #create cellchat object for controls 
+# seurat_obj <- subset(seurat_obj_og, idents = "ref-hom")
+# rm(seurat_obj_og)
+# cellchat <- createCellChat(object = seurat_obj, group.by = "final_class", assay = "RNA")
+
+# CellChatDB <- CellChatDB.human 
+# cellchat@DB <- CellChatDB
+# cellchat <- subsetData(cellchat) 
+
+# cellchat <- identifyOverExpressedGenes(cellchat)
+# cellchat <- identifyOverExpressedInteractions(cellchat)
+# cellchat <- computeCommunProb(cellchat, type = "triMean")
+# cellchat <- filterCommunication(cellchat, min.cells = 10)
+# cellchat <- computeCommunProbPathway(cellchat)
+# cellchat <- aggregateNet(cellchat)
+# cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP") 
+# saveRDS(cellchat, "/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/CellChat_Het_Ref/cell_chat_ref_collapsed.RDS")
+# rm(seurat_obj)
+
+#compare cases vs controls
+##****************merge the cellchat objects
+cellchat_hetero <- readRDS("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/CellChat_Het_Ref/cell_chat_het_collapsed.RDS")
+cellchat_ref <- readRDS("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Output/CellChat_Het_Ref/cell_chat_ref_collapsed.RDS")
+object.list <- list(control = cellchat_ref, case = cellchat_hetero)
+cellchat <- mergeCellChat(object.list, add.names = names(object.list))
+all_signaling_pathways <- unique(CellChatDB.human$interaction$pathway)
+all_signaling_pathways <- all_signaling_pathways[order(all_signaling_pathways)]
+
+##****************compare number of interactions 
+pdf("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/cellchat_hetero_vs_ref/0_cellChat_numInteractions.pdf", width = 12, height = 6)
+gg1 <- compareInteractions(cellchat, show.legend = F, group = c(1,2))
+gg2 <- compareInteractions(cellchat, show.legend = F, group = c(1,2), measure = "weight")
+print(gg1 + gg2)
+dev.off()
+
+##****************create a heatmap showing differential interactions --> in general, excitatory neurons seem to be doing a lot more signaling in cases versus controls 
+pdf("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/cellchat_hetero_vs_ref/1_cellChat_differentialHeatmap.pdf", width = 12, height = 6)
+gg1 <- netVisual_heatmap(cellchat)
+gg2 <- netVisual_heatmap(cellchat, measure = "weight")
+print(gg1 + gg2)
+dev.off()
+
+##****************create a chord plot showing differential iteractions between higher groupings of celltypes
+pdf("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/cellchat_hetero_vs_ref/2_cellChat_differentialCircosPlot.pdf", width = 12, height = 6)  
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_diffInteraction(cellchat, weight.scale = T)
+netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight")
+dev.off()
+
+#****************identify the signaling changes of specific cell populations
+plot_list <- list()
+cell_types <- c("DL_ExN", "UL_ExN", "IN_MGE", "IN_CGE", "Microglia", "Oligo/OPC", "Astro", "VLMC", "Endo")
+for (type in cell_types) {
+    print(type)
+    tryCatch({
+        plot_list[[type]] <- netAnalysis_signalingChanges_scatter(cellchat, idents.use = type)
+    }, error = function(e) {
+        message("Error in netAnalysis_signalingChanges_scatter for type: ", type, "\n", e)
+    })
+}
+
+pdf("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/cellchat_hetero_vs_ref/3_SignalingChangesPerCellType.pdf", width = 16, height = 16)
+patchwork::wrap_plots(plot_list, nrow = 3)
+dev.off()
+
+##****************identify altered signaling with distinct network architecture and interaction strength
+cellchat <- computeNetSimilarityPairwise(cellchat, type = "functional")
+cellchat <- netEmbedding(cellchat, type = "functional")
+cellchat <- netClustering(cellchat, type = "functional")
+
+##distance between pathways 
+pdf("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/cellchat_hetero_vs_ref/4_overallDistanceBetweenPathways.pdf", width = 16, height = 16)
+rankSimilarity(cellchat, type = "functional")
+dev.off()
+
+##altered information flow
+pdf("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/cellchat_hetero_vs_ref/5_overallChangesInInfoFlow.pdf", width = 8, height = 16)
+gg1 <- rankNet(cellchat, mode = "comparison", measure = "weight", sources.use = NULL, targets.use = NULL, stacked = T, do.stat = TRUE)
+print(gg1)
+dev.off()
+
+##****************compare cell-cell communication between cases and controls
+pdf("/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/cellchat_hetero_vs_ref/6_pathway_activity_btwn_cases_and_controls.pdf", width = 12, height = 6)
+all_pathways <- cellchat@netP$control$pathway
+for (pathway in all_pathways) {
+  tryCatch({
+    print(pathway)
+    pathways.show <- pathway
+    par(mfrow = c(1, 2), xpd = TRUE)
+    ht <- list()
+    
+    for (i in 1:length(object.list)) {
+      ht[[i]] <- netVisual_heatmap(
+        object.list[[i]], 
+        signaling = pathways.show, 
+        color.heatmap = "Reds",
+        title.name = paste(pathways.show, "signaling", names(object.list)[i])
+      )
+    }
+    
+    ComplexHeatmap::draw(ht[[1]] + ht[[2]], ht_gap = unit(0.5, "cm"))
+  }, error = function(e) {
+    message("Error encountered for pathway: ", pathway)
+    message("Error message: ", e$message)
+  })
+}
+dev.off()
+
+##****************identify dysfunctional signaling by using differential expression analysis 
+pos.dataset = "case"
+features.name = paste0(pos.dataset, ".merged")
+cellchat <- identifyOverExpressedGenes(cellchat, group.dataset = "datasets", pos.dataset = pos.dataset, features.name = features.name, only.pos = FALSE, thresh.pc = 0.1, thresh.fc = 0.05,thresh.p = 0.05, group.DE.combined = FALSE) 
+net <- netMappingDEG(cellchat, features.name = features.name, variable.all = TRUE)
+net.up <- subsetCommunication(cellchat, net = net, datasets = "case",ligand.logFC = 0.05, receptor.logFC = NULL)
+net.down <- subsetCommunication(cellchat, net = net, datasets = "control",ligand.logFC = -0.05, receptor.logFC = NULL)
+gene.up <- extractGeneSubsetFromPair(net.up, cellchat)
+gene.down <- extractGeneSubsetFromPair(net.down, cellchat)
+write.table(net.up, "/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/cellchat_hetero_vs_ref/7_cellchat_net_up.txt", sep = "\t", quote = FALSE, row.names = TRUE, col.names = TRUE)
+write.table(net.down, "/n/groups/walsh/indData/Maya/FCD_project/analysis/2_Analyze_Full_Object/Figures/cellchat_hetero_vs_ref/7_cellchat_net_down.txt", sep = "\t", quote = FALSE, row.names = TRUE, col.names = TRUE)
+
+
